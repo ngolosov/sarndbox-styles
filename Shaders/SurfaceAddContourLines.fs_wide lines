@@ -1,0 +1,198 @@
+/***********************************************************************
+SurfaceAddContourLines - Enhanced with realistic hillshade and Tanaka contouring
+***********************************************************************/
+
+#extension GL_ARB_texture_rectangle : enable
+
+uniform sampler2DRect pixelCornerElevationSampler;
+uniform float contourLineFactor;
+
+// HILLSHADE SETTINGS
+const float HILLSHADE_INTENSITY = 0.6;     // Hillshade strength
+const float HILLSHADE_AZIMUTH = 315.0;     // Light from northwest
+const float HILLSHADE_ELEVATION = 45.0;    // Natural sun angle
+const float HILLSHADE_EXAGGERATION = 2.0;  // Terrain exaggeration
+const float PIXEL_SCALE = 1.0;             // Gradient sensitivity
+
+// ENHANCED TANAKA CONTOURING SETTINGS
+const float TANAKA_INTENSITY = 1.2;        // Increased strength of Tanaka effect
+const float TANAKA_SHADOW_DARKNESS = 0.0;  // Very dark shadow-side contours (black)
+const float TANAKA_LIGHT_BRIGHTNESS = 0.4; // Lighter but still visible illuminated contours
+const float TANAKA_THRESHOLD = 0.05;       // Reduced threshold for more sensitivity
+const float TANAKA_CONTRAST = 1.5;         // Additional contrast multiplier
+const float TANAKA_SMOOTHING = 0.2;        // Smoothing factor for transitions
+
+// CONTOUR WIDTH SETTINGS
+const float CONTOUR_WIDTH = 0.15;          // Width of contour bands (0.1-0.3 range)
+const float CONTOUR_EDGE_SOFTNESS = 0.7;   // How soft the contour edges are (0.0-1.0)
+
+// Function to calculate surface normal from elevation data
+vec3 calculateSurfaceNormal(vec2 coord) {
+    // Sample elevation values in a 3x3 neighborhood
+    float tl = texture2DRect(pixelCornerElevationSampler, coord + vec2(-1.0, -1.0)).r;
+    float tm = texture2DRect(pixelCornerElevationSampler, coord + vec2( 0.0, -1.0)).r;
+    float tr = texture2DRect(pixelCornerElevationSampler, coord + vec2( 1.0, -1.0)).r;
+    float ml = texture2DRect(pixelCornerElevationSampler, coord + vec2(-1.0,  0.0)).r;
+    float mr = texture2DRect(pixelCornerElevationSampler, coord + vec2( 1.0,  0.0)).r;
+    float bl = texture2DRect(pixelCornerElevationSampler, coord + vec2(-1.0,  1.0)).r;
+    float bm = texture2DRect(pixelCornerElevationSampler, coord + vec2( 0.0,  1.0)).r;
+    float br = texture2DRect(pixelCornerElevationSampler, coord + vec2( 1.0,  1.0)).r;
+    
+    // Apply elevation exaggeration
+    tl *= HILLSHADE_EXAGGERATION; tm *= HILLSHADE_EXAGGERATION; tr *= HILLSHADE_EXAGGERATION;
+    ml *= HILLSHADE_EXAGGERATION; mr *= HILLSHADE_EXAGGERATION;
+    bl *= HILLSHADE_EXAGGERATION; bm *= HILLSHADE_EXAGGERATION; br *= HILLSHADE_EXAGGERATION;
+    
+    // Calculate gradients using Sobel operator
+    float gx = (tr + 2.0*mr + br) - (tl + 2.0*ml + bl);
+    float gy = (bl + 2.0*bm + br) - (tl + 2.0*tm + tr);
+    
+    // Normalize gradients
+    gx *= PIXEL_SCALE / 8.0;
+    gy *= PIXEL_SCALE / 8.0;
+    
+    // Calculate surface normal (pointing up)
+    vec3 normal = normalize(vec3(-gx, -gy, 1.0));
+    return normal;
+}
+
+// Enhanced function to calculate local gradient for Tanaka effect
+vec2 calculateLocalGradient(vec2 coord) {
+    // Use a wider sampling for more stable gradient calculation
+    float left  = texture2DRect(pixelCornerElevationSampler, coord + vec2(-1.5,  0.0)).r;
+    float right = texture2DRect(pixelCornerElevationSampler, coord + vec2( 1.5,  0.0)).r;
+    float down  = texture2DRect(pixelCornerElevationSampler, coord + vec2( 0.0, -1.5)).r;
+    float up    = texture2DRect(pixelCornerElevationSampler, coord + vec2( 0.0,  1.5)).r;
+    
+    float gx = (right - left) * 0.33; // Slightly reduced for gentler gradients
+    float gy = (up - down) * 0.33;
+    
+    return vec2(gx, gy);
+}
+
+// Function to convert azimuth and elevation to 3D direction vector
+vec3 sphericalToCartesian(float azimuth, float elevation) {
+    float azimuthRad = radians(azimuth);
+    float elevationRad = radians(elevation);
+    
+    return vec3(
+        sin(azimuthRad) * cos(elevationRad),
+        cos(azimuthRad) * cos(elevationRad),
+        sin(elevationRad)
+    );
+}
+
+// Realistic hillshade calculation
+float calculateHillshade(vec3 normal, vec3 lightDir) {
+    // Calculate the dot product between surface normal and light direction
+    float cosTheta = dot(normal, lightDir);
+    
+    // Add ambient lighting to avoid pure black shadows
+    float ambient = 0.2;
+    
+    // Combine directional and ambient lighting
+    float shading = max(0.0, cosTheta) + ambient;
+    
+    // Apply gentle contrast enhancement
+    shading = pow(shading, 1.1);
+    
+    // Keep in natural range
+    return clamp(shading, 0.3, 1.2);
+}
+
+// Function to calculate distance to nearest contour line
+float distanceToNearestContour(float elevation) {
+    float scaledElevation = elevation * contourLineFactor;
+    float nearestContour = floor(scaledElevation + 0.5);
+    return abs(scaledElevation - nearestContour) / contourLineFactor;
+}
+
+// Enhanced function to calculate Tanaka contour intensity
+float calculateTanakaIntensity(vec2 coord, vec3 lightDir) {
+    // Get local gradient (slope direction)
+    vec2 gradient = calculateLocalGradient(coord);
+    float gradientMagnitude = length(gradient);
+    
+    // Avoid division by zero for flat areas
+    if(gradientMagnitude < 0.001) {
+        return 0.3; // Medium intensity for flat areas
+    }
+    
+    // Normalize gradient
+    vec2 normalizedGradient = gradient / gradientMagnitude;
+    
+    // Convert light direction to 2D (ignore z component)
+    vec2 lightDir2D = normalize(lightDir.xy);
+    
+    // Calculate how much the slope faces the light
+    float lightAlignment = dot(normalizedGradient, lightDir2D);
+    
+    // Enhanced calculation with more dramatic contrast
+    if(abs(lightAlignment) < TANAKA_THRESHOLD) {
+        // Nearly perpendicular to light - use medium intensity
+        return 0.3;
+    } else if(lightAlignment > 0.0) {
+        // Slope faces away from light (shadow side) - much darker contours
+        float shadowFactor = pow(lightAlignment * TANAKA_INTENSITY, TANAKA_CONTRAST);
+        shadowFactor = smoothstep(0.0, 1.0, shadowFactor); // Smooth transition
+        return mix(0.3, TANAKA_SHADOW_DARKNESS, shadowFactor);
+    } else {
+        // Slope faces toward light (illuminated side) - lighter but visible contours
+        float lightFactor = pow(-lightAlignment * TANAKA_INTENSITY, TANAKA_CONTRAST);
+        lightFactor = smoothstep(0.0, 1.0, lightFactor); // Smooth transition
+        return mix(0.3, TANAKA_LIGHT_BRIGHTNESS, lightFactor);
+    }
+}
+
+void addContourLines(in vec2 fragCoord, inout vec4 baseColor) {
+    // Get elevation at current pixel (center of pixel)
+    float centerElevation = texture2DRect(pixelCornerElevationSampler, fragCoord + vec2(0.5, 0.5)).r;
+    
+    // Calculate distance to nearest contour line
+    float contourDistance = distanceToNearestContour(centerElevation);
+    
+    // Calculate light direction
+    vec3 lightDir = sphericalToCartesian(HILLSHADE_AZIMUTH, HILLSHADE_ELEVATION);
+    
+    /* Check if we're within a contour band */
+    if(contourDistance < CONTOUR_WIDTH) {
+        /* This is within a contour band - apply Tanaka effect */
+        
+        // Calculate how close we are to the center of the contour (0.0 = center, 1.0 = edge)
+        float distanceFromCenter = contourDistance / CONTOUR_WIDTH;
+        
+        // Calculate base Tanaka intensity for this contour segment
+        float baseTanakaIntensity = calculateTanakaIntensity(fragCoord, lightDir);
+        
+        // Create soft edges for the contour band
+        float edgeFactor = 1.0 - smoothstep(0.0, CONTOUR_EDGE_SOFTNESS, distanceFromCenter);
+        
+        // For areas near the edge of contour band, blend with hillshade
+        if(distanceFromCenter > CONTOUR_EDGE_SOFTNESS) {
+            // Calculate surface normal for hillshade
+            vec3 surfaceNormal = calculateSurfaceNormal(fragCoord);
+            float hillshade = calculateHillshade(surfaceNormal, lightDir);
+            
+            // Blend between contour and hillshade at edges
+            float blendFactor = smoothstep(CONTOUR_EDGE_SOFTNESS, 1.0, distanceFromCenter);
+            float finalIntensity = mix(baseTanakaIntensity, hillshade, blendFactor);
+            
+            baseColor.rgb *= finalIntensity;
+        } else {
+            // Pure contour area - apply Tanaka effect
+            baseColor = vec4(baseTanakaIntensity, baseTanakaIntensity, baseTanakaIntensity, 1.0);
+        }
+        
+    } else {
+        /* Apply hillshade effect to non-contour areas */
+        
+        // Calculate surface normal at this fragment
+        vec3 surfaceNormal = calculateSurfaceNormal(fragCoord);
+        
+        // Calculate hillshade value
+        float hillshade = calculateHillshade(surfaceNormal, lightDir);
+        
+        // Apply hillshade by modulating the existing color
+        baseColor.rgb *= mix(1.0, hillshade, HILLSHADE_INTENSITY);
+    }
+}
