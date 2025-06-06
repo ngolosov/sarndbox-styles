@@ -48,6 +48,6 @@ The `SurfaceAddContourLines` shader adds Tanaka contouring and hillshade effects
 - **SurfaceAddContourLines.fs_wide_lines** - Enhanced 4x width contour lines
 
 ### Installation
-Replace the original shader file with your preferred version from the `Shaders` directory in the following directory on your machine:
+Replace the original `SurfaceAddContourLines.fs` shader file with your preferred version from the `Shaders` directory in the following directory on your machine:
 `~/src/SARndbox-2.8/share/SARndbox-2.8/Shaders/`
 
